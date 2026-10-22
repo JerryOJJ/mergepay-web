@@ -10,6 +10,7 @@ import type { Settlement } from "@/lib/types";
 import { SettlementModal, type SettlementModalProps } from "./SettlementModal";
 
 const mutateAsync = vi.fn();
+const trustlineCheckMock = vi.fn();
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -25,6 +26,10 @@ vi.mock("framer-motion", async (importOriginal) => {
 
 vi.mock("@/lib/queries", () => ({
   useConfirmSettlement: () => ({ mutateAsync }),
+}));
+
+vi.mock("@/lib/settlement/trustline", () => ({
+  verifyTrustlineBeforeSettlement: (...args: unknown[]) => trustlineCheckMock(...args),
 }));
 
 vi.mock("@/lib/stellar", async () => {
@@ -59,6 +64,7 @@ vi.mock("@/hooks/useWalletStatus", () => ({
 const { Keypair } = StellarSdk as unknown as { Keypair: { random(): { publicKey(): string } } };
 const payer = Keypair.random().publicKey();
 const recipient = Keypair.random().publicKey();
+const issuer = Keypair.random().publicKey();
 const MEMO = "MP:rent-0526";
 
 const target: SettleTarget = {
@@ -69,13 +75,25 @@ const target: SettleTarget = {
   label: "Settle up with Taylor",
 };
 
-function xdrWith(memo: string, destination = recipient, amount = "10") {
+const issuedTarget: SettleTarget = {
+  ...target,
+  assetCode: "USDC",
+  assetIssuer: issuer,
+};
+
+function xdrWith(
+  memo: string,
+  destination = recipient,
+  amount = "10",
+  assetCode = "XLM",
+  assetIssuer: string | null = null
+) {
   return buildSettlementPaymentXdr({
     source: { publicKey: payer, sequence: "2" },
     destination,
     amount,
-    assetCode: "XLM",
-    assetIssuer: null,
+    assetCode,
+    assetIssuer,
     memo,
     networkPassphrase: NETWORK_PASSPHRASE,
   });
@@ -125,6 +143,7 @@ describe("SettlementModal", () => {
 
   beforeEach(() => {
     capturedIntent = intent();
+    trustlineCheckMock.mockReset().mockResolvedValue(true);
     vi.mocked(api.createSettlement).mockResolvedValue(capturedIntent);
     vi.mocked(signXdr).mockImplementation(async (xdr: string) => xdr);
   });
@@ -138,6 +157,38 @@ describe("SettlementModal", () => {
     renderModal();
     expect(screen.getByText("Taylor")).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Settlement progress" }).querySelector("[aria-current=step]")).toHaveTextContent("Review");
+  });
+
+  it("warns and blocks settlement when the recipient is missing the trustline", async () => {
+    trustlineCheckMock.mockResolvedValue(false);
+    renderModal({ target: issuedTarget });
+
+    expect(await screen.findByTestId("trustline-warning")).toHaveTextContent(
+      "Taylor needs an active USDC trustline"
+    );
+    expect(trustlineCheckMock).toHaveBeenCalledWith(recipient, "USDC", issuer);
+    expect(screen.getByRole("button", { name: /confirm & sign/i })).toBeDisabled();
+    expect(api.createSettlement).not.toHaveBeenCalled();
+    expect(signXdr).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the recipient trustline before opening Freighter", async () => {
+    trustlineCheckMock
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const issuedIntent = intent(MEMO, xdrWith(MEMO, recipient, "10", "USDC", issuer));
+    vi.mocked(api.createSettlement).mockResolvedValue(issuedIntent);
+    renderModal({ target: issuedTarget });
+
+    const confirmButton = screen.getByRole("button", { name: /confirm & sign/i });
+    await waitFor(() => expect(confirmButton).toBeEnabled());
+    fireEvent.click(confirmButton);
+
+    expect(await screen.findByTestId("trustline-warning")).toBeInTheDocument();
+    expect(api.createSettlement).toHaveBeenCalledTimes(1);
+    expect(signXdr).not.toHaveBeenCalled();
+    expect(mutateAsync).not.toHaveBeenCalled();
   });
 
   it("verifies the memo, signs, submits and shows success", async () => {
