@@ -30,6 +30,7 @@ import {
 import {
   calculateAssetBalances,
   fetchHorizonAccountBalances,
+  type ConfiguredAsset,
   type TrustlineAsset,
 } from "./trustline";
 import type { User } from "./types";
@@ -72,22 +73,23 @@ export async function hasTrustline(publicKey: string, assetCode: string, issuer:
 }
 
 /**
- * Live balances + trustline status for the configured settlement assets.
+ * Live balances + trustline status for configured assets or a requested asset.
  *
  * Reads the account from Horizon (via the shared `trustline.ts` helpers)
- * and derives, for every configured asset (XLM + the stable asset), the
- * current balance and whether an active trustline exists. XLM is native
- * and always "has a trustline".
+ * and derives the current balance and trustline status for each configured
+ * asset, or for the requested assets when provided. XLM is native and always
+ * "has a trustline".
  *
  * Failures degrade to an empty balance list (never a throw) so the widget
  * can render "balance unavailable" without blocking the rest of the page.
  */
 export async function getWalletAssets(
-  publicKey: string
+  publicKey: string,
+  requiredAssets?: ConfiguredAsset[]
 ): Promise<TrustlineAsset[]> {
   if (!publicKey) return [];
   const balances = await fetchHorizonAccountBalances(publicKey);
-  return calculateAssetBalances(balances, SETTLEMENT_ASSETS);
+  return calculateAssetBalances(balances, requiredAssets ?? SETTLEMENT_ASSETS);
 }
 
 /**
