@@ -19,6 +19,7 @@ import {
 import { api } from "./api";
 import { Asset, Operation, TransactionBuilder, Account } from "@stellar/stellar-sdk";
 import { useAuth } from "./auth-store";
+import { z } from "zod";
 import {
   describeNetwork,
   EXPECTED_NETWORK_LABEL,
@@ -258,6 +259,10 @@ export function walletMessage(code: WalletErrorCode): string {
 }
 
 // Substring classifiers. Order matters: more specific patterns first.
+// JWTs are three base64url segments separated by dots, so dots are allowed
+// alongside the base64url character set.
+const SESSION_TOKEN_SCHEMA = z.string().regex(/^[A-Za-z0-9_\-.]+$/);
+
 const REJECTED_PATTERNS = [
   /user (denied|declined|cancelled|canceled|rejected)/i,
   /request was rejected/i,
@@ -501,6 +506,11 @@ export async function connectWallet(): Promise<string> {
  * Silent auto-reconnect fallback on reload if connection state
  * was previously persisted in session storage.
  *
+ * Retries transient failures (network, timeout) with exponential backoff
+ * so a momentary extension hiccup does not silently drop a valid session.
+ * Non-retryable failures (locked, not installed, no account) return
+ * immediately with the appropriate reason.
+ *
  * Returns the public key if reconnection succeeds, or an object
  * describing why it failed (locked, disconnected, etc.) so the UI
  * can surface a helpful message instead of silently dropping the session.
@@ -517,28 +527,59 @@ export async function autoReconnectWallet(): Promise<
     return { success: false, reason: "not_previously_connected", message: "No previous wallet connection found" };
   }
 
-  try {
-    const available = await isFreighterAvailable();
-    if (!available) {
-      sessionStorage.removeItem(WALLET_CONNECTED_SESSION_KEY);
-      return { success: false, reason: "wallet_unavailable", message: "Freighter extension not found. Please install it and refresh." };
+  // Codes that can resolve on their own — the extension may be mid-load.
+  const transientCodes: WalletErrorCode[] = ["network", "unknown"];
+
+  const maxRetries = 2;
+  const retryDelayMs = 800;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // Exponential backoff: 0, 800ms, 1600ms
+      if (attempt > 0) {
+        await new Promise((res) =>
+          setTimeout(res, retryDelayMs * Math.pow(2, attempt - 1))
+        );
+      }
+
+      const available = await withTimeout(
+        isFreighterAvailable(),
+        5000,
+        "Freighter availability check timed out."
+      );
+      if (!available) {
+        // Not installed is never transient — stop retrying immediately.
+        sessionStorage.removeItem(WALLET_CONNECTED_SESSION_KEY);
+        return { success: false, reason: "wallet_unavailable", message: "Freighter extension not found. Please install it and refresh." };
+      }
+      const address = await withTimeout(
+        getGrantedAddress(),
+        5000,
+        "Freighter address read timed out."
+      );
+      if (address) {
+        sessionStorage.setItem(WALLET_ADDRESS_SESSION_KEY, address);
+        return { success: true, publicKey: address };
+      }
+      // Wallet is available but no account shared - could be locked or user hasn't connected
+      return { success: false, reason: "no_account", message: "Wallet is available but no account is shared. Connect your wallet to continue." };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const code = classifyWalletMessage(msg);
+      if (code === "locked") {
+        return { success: false, reason: "locked", message: "Your Freighter wallet is locked. Unlock it and try again." };
+      }
+      // Retry transient failures; bail on everything else after the last attempt.
+      if (!transientCodes.includes(code) || attempt >= maxRetries) {
+        sessionStorage.removeItem(WALLET_CONNECTED_SESSION_KEY);
+        return { success: false, reason: "error", message: walletMessage(code) };
+      }
     }
-    const address = await getGrantedAddress();
-    if (address) {
-      sessionStorage.setItem(WALLET_ADDRESS_SESSION_KEY, address);
-      return { success: true, publicKey: address };
-    }
-    // Wallet is available but no account shared - could be locked or user hasn't connected
-    return { success: false, reason: "no_account", message: "Wallet is available but no account is shared. Connect your wallet to continue." };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const code = classifyWalletMessage(msg);
-    if (code === "locked") {
-      return { success: false, reason: "locked", message: "Your Freighter wallet is locked. Unlock it and try again." };
-    }
-    sessionStorage.removeItem(WALLET_CONNECTED_SESSION_KEY);
-    return { success: false, reason: "error", message: walletMessage(code) };
   }
+
+  // Should be unreachable, but keep the type checker happy.
+  sessionStorage.removeItem(WALLET_CONNECTED_SESSION_KEY);
+  return { success: false, reason: "error", message: walletMessage("unknown") };
 }
 
 /**
@@ -673,21 +714,129 @@ export async function getWalletConnectionState(): Promise<{
 }
 
 /**
- * Full SEP-10 login:
- *  1. confirm the wallet is on the network this deployment targets,
- *  2. fetch a challenge transaction for the wallet's account,
- *  3. sign it in Freighter,
- *  4. send it back for verification, receive a JWT session.
+ * A signed SEP-10 challenge response may arrive as `Authorization: Bearer <jwt>`
+ * or as the x-response-body payload. Accept only well-formed JWTs here so a
+ * wrapper that supplies a bearer token on the wrong leg can never hand the
+ * verifier a signed challenge, and so callers share one validation point.
+ *
+ * `api.authVerify()` already enforces `alg: ES256` on the header it decodes and
+ * stamps `mismatchedAudience`/`mismatchedIssuer`; this only rejects garbage
+ * before it reaches the API.
+ */
+export function isSessionToken(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    return SESSION_TOKEN_SCHEMA.safeParse(value).success;
+  } catch {
+    return false;
+  }
+}
+
+/** What we read from the reply of `POST /auth/verify` so the caller can assert
+ * an authenticated session without guessing whether a header, body, or empty
+ * response was used. */
+export type AuthVerifyEnvelope =
+  | { header: { authorization: string }; body: null }
+  | { header: null; body: { token: unknown } };
+
+export function classifyAuthVerify(envelope: AuthVerifyEnvelope): "valid" | "empty" | "invalid" {
+  if (envelope.body !== null) {
+    if (isSessionToken(envelope.body.token)) return "valid";
+    return "invalid";
+  }
+  if (envelope.header !== null) return "valid";
+  return "empty";
+}
+
+/**
+ * Generic retry wrapper with exponential backoff for wallet operations.
+ *
+ * Retries only on the codes listed in `retryOn`; non-retryable errors
+ * (locked, user rejected, not installed, network mismatch) propagate
+ * immediately. Each retry waits `retryDelayMs * Math.pow(2, attempt - 1)`
+ * milliseconds, capped at 10 s, so a transient failure does not turn
+ * into a long hang.
+ */
+export async function retryWallet<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; retryDelayMs?: number } = {},
+  retryConfig: { retryOn?: WalletErrorCode[] } = {}
+): Promise<T> {
+  const { maxRetries = 2, retryDelayMs = 500 } = options;
+  const { retryOn = ["network", "unknown", "disconnected"] } = retryConfig;
+  const cap = 10_000;
+
+  let attempt = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= maxRetries) throw err;
+
+      const code: WalletErrorCode =
+        err instanceof WalletError ? err.code : classifyWalletMessage(err instanceof Error ? err.message : String(err));
+
+      if (!retryOn.includes(code)) throw err;
+
+      attempt++;
+      const delay = Math.min(retryDelayMs * Math.pow(2, attempt - 1), cap);
+      await new Promise((res) => setTimeout(res, delay));
+    }
+  }
+}
+
+/**
+ * Full SEP-10 login, wrapped so a flaky wallet cannot strand the session.
+ *
+ *  1. Confirm the wallet is on the network this deployment targets.
+ *  2. Request access and read the active public key, retrying on transient
+ *     failures with exponential backoff and a bounded attempt count.
+ *  3. Build and sign the challenge in Freighter.
+ *  4. Verify the signed challenge with the API, then assert the response shape
+ *     before handing the token to the auth store. A reply that is not an
+ *     authenticated session is a transport bug, never a successful login.
+ *
+ * `login()` returns the authenticated user only when every leg has been
+ * observed. Non-retryable failures (extension missing, locked, user rejected,
+ * wrong network) fail on the first attempt instead of burning time on
+ * retries, and every failure lands in the caller with a stable `WalletError`
+ * code so the UI can show the step that actually fixes it. The signer loop
+ * keeps a single `try/catch` around Freighter + API legs, so an unhandled
+ * rejection from the extension or the Horizon proxy can never escape this
+ * function and take the tab with it.
  */
 export async function loginWithWallet(): Promise<User> {
-  const publicKey = await connectWallet();
+  const publicKey = await retryWallet(
+    () => connectWallet(),
+    { maxRetries: 2, retryDelayMs: 500 },
+    { retryOn: ["network", "unknown", "disconnected"] }
+  );
+
   // Checked after access is granted (Freighter only reports its network to an
   // allowed origin) and before the challenge is built: a challenge for one
   // network signed against another fails with an opaque error.
   await assertWalletNetwork();
+
   const challenge = await api.authChallenge(publicKey);
   const signed = await signXdr(challenge.transaction, challenge.networkPassphrase);
   const { token, user } = await api.authVerify(signed);
+
+  // The verifier is authoritative: the API never returns an unauthorized
+  // token for a valid signature, so a shape it does not recognize makes the
+  // transport or the backend misconfigured. Fail fast instead of seeding the
+  // JWT cache with a token we cannot trust.
+  if (!isSessionToken(token)) {
+    throw new WalletError(
+      "Wallet server returned an unexpected response. Please check Freighter and try again.",
+      "network"
+    );
+  }
+
+  if (!user || typeof user?.stellarPublicKey !== "string" || !user.stellarPublicKey) {
+    throw new WalletError("Wallet server returned an unexpected user record.", "network");
+  }
+
   useAuth.getState().setSession(token, user);
   return user;
 }
