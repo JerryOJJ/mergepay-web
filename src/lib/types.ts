@@ -577,6 +577,21 @@ export interface TrustlineAsset {
   limit?: string;
 }
 
+export interface AssetTrustlineWidgetProps {
+  /** Optional connected account public key. Falls back to active auth/wallet key. */
+  publicKey?: string;
+  /** Assets to inspect and verify. Defaults to SETTLEMENT_ASSETS (XLM, USDC). */
+  requiredAssets?: ConfiguredAsset[];
+  /** Minimum balance thresholds required for each asset. */
+  minimumBalances?: Record<string, string | number>;
+  /** Callback fired when a trustline is successfully added through the widget. */
+  onTrustlineAdded?: (assetCode: string) => void;
+  /** Optional container CSS class. */
+  className?: string;
+  /** Whether to render in compact presentation mode. */
+  compact?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Group Activity Feed
 // ---------------------------------------------------------------------------

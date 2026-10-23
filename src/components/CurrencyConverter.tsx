@@ -17,6 +17,7 @@ import { Input, Label } from "@/components/ui/input";
 import { AssetBadge } from "@/components/asset-badge";
 import { useExchangeRates } from "@/hooks/useExchangeRates";
 import { convertAmount, normalizeAssetCode } from "@/lib/exchange";
+import { calculateConversion } from "@/lib/conversion";
 import { formatAssetAmount } from "@/lib/currency";
 
 export interface CurrencyConverterProps {
@@ -73,13 +74,23 @@ export function CurrencyConverter({
   const [targetCurrency, setTargetCurrency] = useState(defaultTargetCurrency);
 
   // Compute conversion rate and converted amount
-  const { convertedAmount, unitRate } = useMemo(() => {
+  const { convertedAmount, unitRate, isFallback } = useMemo(() => {
     const from = normalizeAssetCode(sourceCurrency);
     const to = normalizeAssetCode(targetCurrency);
 
     // If identical currency
     if (from === to) {
-      return { convertedAmount: sourceAmount, unitRate: 1.0 };
+      return { convertedAmount: sourceAmount, unitRate: 1.0, isFallback: false };
+    }
+
+    // Try primary conversion utility with fallback support
+    const result = calculateConversion(sourceAmount || "0", from, to, rates);
+    if (!result.error) {
+      return {
+        convertedAmount: result.targetAmount,
+        unitRate: result.rate,
+        isFallback: result.isFallback || !isLive,
+      };
     }
 
     // Attempt direct conversion using exchange utility
@@ -90,8 +101,9 @@ export function CurrencyConverter({
     return {
       convertedAmount: converted ?? "0",
       unitRate: rateNumber,
+      isFallback: !isLive,
     };
-  }, [sourceAmount, sourceCurrency, targetCurrency, rates]);
+  }, [sourceAmount, sourceCurrency, targetCurrency, rates, isLive]);
 
   // Trigger onConvert callback
   useEffect(() => {
@@ -126,8 +138,8 @@ export function CurrencyConverter({
             </h4>
           </div>
         </div>
-        <Badge tone={isLive ? "lime" : "butter"} className="text-[10px] font-mono">
-          {isLive ? "Live DEX Rates" : "Indicative Rates"}
+        <Badge tone={!isFallback && isLive ? "lime" : "butter"} className="text-[10px] font-mono">
+          {!isFallback && isLive ? "Live DEX Rates" : "Indicative Rates"}
         </Badge>
       </div>
 
