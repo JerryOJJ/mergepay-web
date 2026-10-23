@@ -14,7 +14,7 @@
  * its own so it can sit inside a parent form (e.g. `AddExpenseDialog`).
  */
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useId, useMemo, useRef } from "react";
 import { useFieldArray, useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertTriangle, CheckCircle2, Divide, Info } from "lucide-react";
@@ -151,6 +151,7 @@ export function SplitCalculator({
   );
   const calc = useMemo(() => calculateSplit(mode, totalAmount, rows), [mode, totalAmount, rows]);
   const imbalance = describeSplitImbalance(calc);
+  const imbalanceId = useId();
 
   // Report upward whenever the effective split changes.
   const onChangeRef = useRef(onChange);
@@ -256,8 +257,11 @@ export function SplitCalculator({
                       inputMode="decimal"
                       autoComplete="off"
                       placeholder={mode === "custom" ? "0.00" : "0"}
-                      aria-invalid={error ? true : undefined}
-                      aria-describedby={error ? `${inputId}-error` : undefined}
+                      aria-invalid={error || imbalance ? true : undefined}
+                      aria-describedby={[
+                        error ? `${inputId}-error` : null,
+                        imbalance ? imbalanceId : null,
+                      ].filter(Boolean).join(" ") || undefined}
                       onKeyDown={(e) => {
                         if (isBlockedDecimalKey(e.key)) {
                           e.preventDefault();
@@ -306,7 +310,7 @@ export function SplitCalculator({
         </ul>
       )}
 
-      <SplitStatus calc={calc} imbalance={imbalance} assetCode={assetCode} />
+      <SplitStatus calc={calc} imbalance={imbalance} imbalanceId={imbalanceId} assetCode={assetCode} />
     </section>
   );
 }
@@ -314,10 +318,12 @@ export function SplitCalculator({
 function SplitStatus({
   calc,
   imbalance,
+  imbalanceId,
   assetCode,
 }: {
   calc: SplitCalculation;
   imbalance: string | null;
+  imbalanceId: string;
   assetCode: string;
 }) {
   const base = "flex items-start gap-2 rounded-xl border-2 border-ink p-3 text-sm";
@@ -337,7 +343,7 @@ function SplitStatus({
 
   if (imbalance) {
     return (
-      <div className={cn(base, "bg-flamingo-pale shadow-brutal-sm")} role="alert" aria-live="assertive" data-testid="split-status">
+      <div id={imbalanceId} className={cn(base, "bg-flamingo-pale shadow-brutal-sm")} role="alert" aria-live="assertive" data-testid="split-status">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
         <p className="font-bold">{imbalance}</p>
       </div>

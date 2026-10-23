@@ -260,6 +260,20 @@ describe("expenseFormSchema — custom split", () => {
     expect(firstMessage(result)).toMatch(/short by 0\.0000001/);
   });
 
+  it("detects a one-stroop mismatch when splitting a decimal total three ways", () => {
+    const result = parse({
+      amount: "10",
+      splitType: "custom",
+      shares: [
+        { userId: "user-a", amount: "3.3333333" },
+        { userId: "user-b", amount: "3.3333333" },
+        { userId: "user-c", amount: "3.3333333" },
+      ],
+    });
+    expect(result.success).toBe(false);
+    expect(firstMessage(result)).toMatch(/short by 0\.0000001/);
+  });
+
   it("rejects negative share amounts", () => {
     const result = custom([
       { userId: "user-a", amount: "160" },

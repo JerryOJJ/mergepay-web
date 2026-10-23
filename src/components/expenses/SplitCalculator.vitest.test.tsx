@@ -49,6 +49,20 @@ describe("SplitCalculator", () => {
     });
   });
 
+  it("associates split-total errors with every allocation input", async () => {
+    renderCalculator();
+    fireEvent.click(screen.getByRole("radio", { name: "Exact amounts" }));
+    fireEvent.change(screen.getByLabelText("Ada"), { target: { value: "60" } });
+    fireEvent.change(screen.getByLabelText("Ben"), { target: { value: "30" } });
+
+    const status = await screen.findByRole("alert");
+    for (const name of ["Ada", "Ben"]) {
+      const input = screen.getByLabelText(name);
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      expect(input.getAttribute("aria-describedby")).toContain(status.id);
+    }
+  });
+
   it("warns when percentages exceed 100%", async () => {
     renderCalculator();
     fireEvent.click(screen.getByRole("radio", { name: "Percentage" }));
