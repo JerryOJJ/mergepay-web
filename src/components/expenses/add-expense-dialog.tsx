@@ -283,6 +283,13 @@ export function AddExpenseDialog({
     return expenseFormSchema.safeParse(payload);
   }, [title, description, amount, asset, splitType, sharesPayload, payerUserId, memo, receiptUrl]);
 
+  /**
+   * True only when the Zod schema accepts the current form values.
+   * Used to disable the submit button while any validation error exists,
+   * alongside the wallet-disconnected and submitting guards.
+   */
+  const isFormValid = validationResult.success;
+
   const fieldErrors = useMemo(() => {
     if (validationResult.success) return {};
     const map: Record<string, string> = {};
@@ -589,7 +596,7 @@ export function AddExpenseDialog({
           <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" loading={pending} disabled={submitBlocked} data-testid="add-expense-confirm">
+          <Button type="submit" loading={pending} disabled={submitBlocked || !isFormValid} data-testid="add-expense-confirm">
             {isOffline ? "Save offline" : "Add Expense"}
           </Button>
         </div>
